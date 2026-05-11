@@ -1,0 +1,156 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import joblib
+from pathlib import Path
+
+from config import CARPETA_NORM, COLS_EXCLUIR, VENTANA
+
+# ─────────────────────────────────────────────
+# CARGAR MODELO Y NOMBRES DE SENSORES
+# ─────────────────────────────────────────────
+ruta_modelo = Path(r"C:\Users\nacho\OneDrive\Escritorio\UCLM AEROESPACIAL\TFG\CÓDIGOS\modelo_rf.pkl")
+rf          = joblib.load(ruta_modelo)
+
+print("=" * 60)
+print("ANÁLISIS DE IMPORTANCIA DE SENSORES")
+print("=" * 60)
+print(f"\n  Modelo cargado: {rf.n_estimators} árboles")
+
+
+# ─────────────────────────────────────────────
+# RECUPERAR NOMBRES REALES DE SENSORES
+# ─────────────────────────────────────────────
+df_ref        = pd.read_csv(next(CARPETA_NORM.glob('*_dev_norm.csv')))
+cols_sensores = [c for c in df_ref.columns if c not in COLS_EXCLUIR]
+del df_ref
+
+print(f"  Sensores identificados ({len(cols_sensores)}): {cols_sensores}")
+
+# Nombres de las 420 características aplanadas
+# sensor_t0 = valor del sensor en el primer ciclo de la ventana
+# sensor_t29 = valor del sensor en el último ciclo de la ventana
+nombres_features = [f"{sensor}_t{t}"
+                    for sensor in cols_sensores
+                    for t in range(VENTANA)]
+
+print(f"  Total características: {len(nombres_features)}")
+
+
+# ─────────────────────────────────────────────
+# IMPORTANCIA POR CARACTERÍSTICA INDIVIDUAL
+# ─────────────────────────────────────────────
+importancias_raw = pd.Series(
+    rf.feature_importances_,
+    index=nombres_features
+).sort_values(ascending=False)
+
+print("\n" + "=" * 60)
+print("TOP 20 CARACTERÍSTICAS MÁS IMPORTANTES")
+print("=" * 60)
+print(importancias_raw.head(20).to_string())
+
+
+# ─────────────────────────────────────────────
+# IMPORTANCIA AGREGADA POR SENSOR
+# suma la importancia de todos los instantes
+# temporales de cada sensor
+# ─────────────────────────────────────────────
+imp_por_sensor = {}
+
+for sensor in cols_sensores:
+    # Seleccionamos todas las características de este sensor
+    cols_sensor = [f"{sensor}_t{t}" for t in range(VENTANA)]
+    # Sumamos su importancia total
+    imp_por_sensor[sensor] = importancias_raw[cols_sensor].sum()
+
+imp_sensor = pd.Series(imp_por_sensor).sort_values(ascending=False)
+
+print("\n" + "=" * 60)
+print("IMPORTANCIA AGREGADA POR SENSOR")
+print("=" * 60)
+for sensor, imp in imp_sensor.items():
+    barra = '█' * int(imp * 300)
+    print(f"  {sensor:<8}  {imp:.4f}  {barra}")
+
+
+# ─────────────────────────────────────────────
+# IMPORTANCIA POR INSTANTE TEMPORAL
+# para cada sensor, cómo varía su importancia
+# a lo largo de los 30 ciclos de la ventana
+# ─────────────────────────────────────────────
+print("\n" + "=" * 60)
+print("EVOLUCIÓN TEMPORAL DE IMPORTANCIA")
+print("=" * 60)
+
+# Seleccionar los 5 sensores más importantes
+top5_sensores = imp_sensor.head(5).index.tolist()
+
+imp_temporal = pd.DataFrame(index=range(VENTANA),
+                             columns=top5_sensores)
+
+for sensor in top5_sensores:
+    for t in range(VENTANA):
+        imp_temporal.loc[t, sensor] = importancias_raw[f"{sensor}_t{t}"]
+
+imp_temporal = imp_temporal.astype(float)
+
+
+# ─────────────────────────────────────────────
+# GRÁFICAS
+# ─────────────────────────────────────────────
+fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+fig.suptitle('Análisis de importancia de sensores — Random Forest',
+             fontsize=14, fontweight='bold')
+
+
+# ── Gráfica 1 — Importancia agregada por sensor ──
+colores = ['crimson' if i < 3 else 'steelblue'
+           for i in range(len(imp_sensor))]
+
+axes[0].barh(imp_sensor.index, imp_sensor.values, color=colores)
+axes[0].set_title('Importancia agregada por sensor', fontweight='bold')
+axes[0].set_xlabel('Importancia relativa')
+axes[0].invert_yaxis()
+axes[0].grid(True, alpha=0.3, axis='x')
+axes[0].axvline(x=1/len(cols_sensores), color='orange',
+                linestyle='--', linewidth=1,
+                label=f'Importancia uniforme (1/{len(cols_sensores)})')
+axes[0].legend(fontsize=8)
+
+
+# ── Gráfica 2 — Top 20 características individuales ──
+top20 = importancias_raw.head(20)
+axes[1].barh(top20.index, top20.values, color='steelblue')
+axes[1].set_title('Top 20 características individuales', fontweight='bold')
+axes[1].set_xlabel('Importancia relativa')
+axes[1].invert_yaxis()
+axes[1].grid(True, alpha=0.3, axis='x')
+
+
+# ── Gráfica 3 — Evolución temporal top 5 sensores ──
+colores_lineas = ['crimson', 'steelblue', 'seagreen',
+                  'orange', 'purple']
+
+for i, sensor in enumerate(top5_sensores):
+    axes[2].plot(range(VENTANA),
+                 imp_temporal[sensor].values,
+                 color=colores_lineas[i],
+                 linewidth=1.5,
+                 label=sensor,
+                 marker='o', markersize=3)
+
+axes[2].set_title('Evolución temporal de importancia\n(Top 5 sensores)',
+                  fontweight='bold')
+axes[2].set_xlabel('Ciclo dentro de la ventana (t)')
+axes[2].set_ylabel('Importancia')
+axes[2].legend()
+axes[2].grid(True, alpha=0.3)
+
+
+plt.tight_layout()
+plt.savefig('importancia_sensores.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+print("\n✓ Análisis completado.")
+print("  Gráfica guardada: importancia_sensores.png")

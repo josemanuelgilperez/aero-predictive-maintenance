@@ -1,0 +1,286 @@
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # silencia avisos de TensorFlow
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+from pathlib import Path
+
+from config import (CARPETA_NORM, CARPETA_VENTANAS,
+                    COLS_EXCLUIR, VENTANA, PASO,
+                    LSTM_UNITS, LSTM_LAYERS, DROPOUT,
+                    DENSE_UNITS, DL_BATCH_SIZE, DL_EPOCHS,
+                    DL_LEARNING_RATE, ES_PATIENCE,
+                    LR_PATIENCE, LR_FACTOR, LR_MIN,
+                    RUTA_MODELO_LSTM)
+
+# ─────────────────────────────────────────────
+# REPRODUCIBILIDAD
+# ─────────────────────────────────────────────
+SEED = 42
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
+
+print("=" * 60)
+print("LSTM — ENTRENAMIENTO")
+print("=" * 60)
+print(f"\n  TensorFlow version: {tf.__version__}")
+print(f"  GPU disponible:     {tf.config.list_physical_devices('GPU')}")
+print(f"\n  Hiperparámetros:")
+print(f"  LSTM units:      {LSTM_UNITS}")
+print(f"  LSTM layers:     {LSTM_LAYERS}")
+print(f"  Dropout:         {DROPOUT}")
+print(f"  Dense units:     {DENSE_UNITS}")
+print(f"  Batch size:      {DL_BATCH_SIZE}")
+print(f"  Epochs máx:      {DL_EPOCHS}")
+print(f"  Learning rate:   {DL_LEARNING_RATE}")
+print(f"  Early stopping:  {ES_PATIENCE} épocas")
+
+
+# ══════════════════════════════════════════════
+# BLOQUE 1 — Carga de datos (validación mixta)
+# ══════════════════════════════════════════════
+
+print("\n" + "=" * 60)
+print("BLOQUE 1: CARGA DE DATOS")
+print("=" * 60)
+
+# ── Recuperar nombres de sensores ──
+df_ref        = pd.read_csv(next(CARPETA_NORM.glob('*_dev_norm.csv')))
+cols_sensores = [c for c in df_ref.columns if c not in COLS_EXCLUIR]
+del df_ref
+
+n_sensores = len(cols_sensores)
+print(f"\n  Sensores: {n_sensores}")
+print(f"  Ventana:  {VENTANA} ciclos")
+print(f"  Shape entrada LSTM: ({DL_BATCH_SIZE}, {VENTANA}, {n_sensores})")
+
+# ── Localizar archivos ──
+archivos_dev = sorted(CARPETA_VENTANAS.glob('*_dev_vent.npz'))
+print(f"\n  Archivos dev encontrados: {len(archivos_dev)}")
+
+
+# ── Función de validación mixta ──
+def crear_validacion_mixta(archivos, fraccion=0.1, seed=42):
+    """
+    Crea un conjunto de validación tomando una fracción
+    aleatoria de TODOS los archivos dev en lugar de
+    usar un único archivo completo.
+
+    Parámetros:
+    ───────────
+    archivos  : lista de archivos .npz
+    fraccion  : proporción de cada archivo usada en validación
+    seed      : semilla para reproducibilidad
+    """
+    np.random.seed(seed)
+    X_val_list, Y_val_list = [], []
+
+    print("\n  Construyendo validación mixta...")
+    for archivo in archivos:
+        datos = np.load(archivo)
+        n     = datos['X'].shape[0]
+        idx   = np.random.choice(n, int(n * fraccion),
+                                 replace=False)
+        X_val_list.append(datos['X'][idx])
+        Y_val_list.append(datos['Y'][idx])
+
+        print(f"    {archivo.name}: "
+              f"{int(n * fraccion)} muestras de {n}")
+        del datos
+
+    X_val = np.concatenate(X_val_list, axis=0).astype(np.float32)
+    Y_val = np.concatenate(Y_val_list, axis=0).astype(np.float32)
+    del X_val_list, Y_val_list
+
+    return X_val, Y_val
+
+
+# ── Crear validación mixta ──
+X_val, Y_val = crear_validacion_mixta(archivos_dev, fraccion=0.1)
+
+# Todos los archivos se usan para train
+# (la validación ya está extraída de forma aleatoria)
+archivos_train = archivos_dev
+
+print(f"\n  X_val shape: {X_val.shape}")
+print(f"  Y_val shape: {Y_val.shape}")
+print(f"  Memoria X_val: {X_val.nbytes / 1e6:.1f} MB")
+print(f"\n  Archivos train: {len(archivos_train)}")
+print(f"\n✓ Datos de validación mixta creados correctamente.")
+
+
+# ══════════════════════════════════════════════
+# BLOQUE 2 — Definición de la arquitectura
+# ══════════════════════════════════════════════
+
+print("\n" + "=" * 60)
+print("BLOQUE 2: ARQUITECTURA DEL MODELO")
+print("=" * 60)
+
+def construir_lstm(ventana, n_sensores, units, layers,
+                   dropout, dense_units, learning_rate):
+    """
+    Construye y devuelve el modelo LSTM compilado.
+
+    Parámetros:
+    ───────────
+    ventana       : longitud de la ventana temporal
+    n_sensores    : número de sensores de entrada
+    units         : neuronas por capa LSTM
+    layers        : número de capas LSTM apiladas
+    dropout       : fracción de neuronas desactivadas
+    dense_units   : neuronas de la capa densa intermedia
+    learning_rate : velocidad de aprendizaje del optimizador
+    """
+
+    modelo = keras.Sequential(name="LSTM_RUL")
+
+    # ── Capa de entrada ──
+    modelo.add(keras.Input(shape=(ventana, n_sensores)))
+
+    # ── Capas LSTM apiladas ──
+    for i in range(layers):
+        return_seq = (i < layers - 1)  # True en todas menos la última
+        modelo.add(layers_module.LSTM(
+            units            = units,
+            return_sequences = return_seq,
+            name             = f"lstm_{i+1}"
+        ))
+        modelo.add(layers_module.Dropout(
+            rate = dropout,
+            name = f"dropout_{i+1}"
+        ))
+
+    # ── Capa densa intermedia ──
+    modelo.add(layers_module.Dense(
+        units      = dense_units,
+        activation = 'relu',
+        name       = 'dense_1'
+    ))
+
+    # ── Capa de salida ──
+    modelo.add(layers_module.Dense(
+        units      = 1,
+        activation = 'linear',
+        name       = 'output'
+    ))
+
+    # ── Compilación ──
+    modelo.compile(
+        optimizer = keras.optimizers.Adam(learning_rate=learning_rate),
+        loss      = 'mse',
+        metrics   = ['mae']
+    )
+
+    return modelo
+
+
+# Renombrar layers para evitar conflicto con variable 'layers'
+layers_module = layers
+
+# Construir modelo
+modelo = construir_lstm(
+    ventana       = VENTANA,
+    n_sensores    = n_sensores,
+    units         = LSTM_UNITS,
+    layers        = LSTM_LAYERS,
+    dropout       = DROPOUT,
+    dense_units   = DENSE_UNITS,
+    learning_rate = DL_LEARNING_RATE
+)
+
+# Resumen de la arquitectura
+print()
+modelo.summary()
+
+# Número total de parámetros entrenables
+params = modelo.count_params()
+print(f"\n  Parámetros entrenables: {params:,}")
+print(f"  Memoria aproximada del modelo: {params * 4 / 1e6:.2f} MB")
+
+
+# ══════════════════════════════════════════════
+# BLOQUE 3 — Callbacks y entrenamiento
+# ══════════════════════════════════════════════
+
+print("\n" + "=" * 60)
+print("BLOQUE 3: ENTRENAMIENTO")
+print("=" * 60)
+
+# ── Definición de callbacks ──
+callbacks = [
+    keras.callbacks.EarlyStopping(
+        monitor              = 'val_loss',
+        patience             = ES_PATIENCE,
+        restore_best_weights = True,
+        verbose              = 1
+    ),
+    keras.callbacks.ReduceLROnPlateau(
+        monitor  = 'val_loss',
+        factor   = LR_FACTOR,
+        patience = LR_PATIENCE,
+        min_lr   = LR_MIN,
+        verbose  = 1
+    ),
+    keras.callbacks.ModelCheckpoint(
+        filepath          = str(RUTA_MODELO_LSTM),
+        monitor           = 'val_loss',
+        save_best_only    = True,
+        verbose           = 1
+    )
+]
+
+print("\n  Callbacks definidos:")
+print(f"  EarlyStopping:     patience={ES_PATIENCE} épocas")
+print(f"  ReduceLROnPlateau: factor={LR_FACTOR}, patience={LR_PATIENCE}")
+print(f"  ModelCheckpoint:   guarda mejor modelo automáticamente")
+
+
+# ── Entrenamiento archivo a archivo ──
+print("\n" + "─" * 60)
+print("  Iniciando entrenamiento...")
+print("─" * 60)
+
+historial_global = {'loss': [], 'mae': [], 'val_loss': [], 'val_mae': []}
+
+for epoca_archivo, archivo in enumerate(archivos_train):
+    print(f"\n  [{epoca_archivo + 1}/{len(archivos_train)}] "
+          f"Entrenando con {archivo.name}...")
+
+    try:
+        # Cargar archivo de train
+        datos = np.load(archivo)
+        X_train = datos['X'].astype(np.float32)
+        Y_train = datos['Y'].astype(np.float32)
+        del datos
+
+        print(f"  X_train shape: {X_train.shape}  |  "
+              f"Memoria: {X_train.nbytes / 1e6:.1f} MB")
+
+        # Entrenar sobre este archivo
+        historial = modelo.fit(
+            X_train, Y_train,
+            validation_data = (X_val, Y_val),
+            epochs          = DL_EPOCHS,
+            batch_size      = DL_BATCH_SIZE,
+            callbacks       = callbacks,
+            verbose         = 1
+        )
+
+        # Acumular historial
+        for key in historial_global:
+            historial_global[key].extend(historial.history[key])
+
+        del X_train, Y_train
+
+    except Exception as e:
+        print(f"  ⚠️  OMITIDO — {e}")
+        continue
+
+print("\n✓ Entrenamiento completado.")
+print(f"  Épocas totales: {len(historial_global['loss'])}")
+print(f"  Mejor val_loss: {min(historial_global['val_loss']):.4f}")

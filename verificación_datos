@@ -1,0 +1,106 @@
+import pandas as pd
+from pathlib import Path
+
+# ─────────────────────────────────────────────
+# RUTA A LA CARPETA DE ARCHIVOS NORMALIZADOS
+# ─────────────────────────────────────────────
+carpeta = Path(r"C:\Users\nacho\OneDrive\Escritorio\C-MAPSS 2\normalizados")
+
+archivos_csv = sorted(carpeta.glob('*.csv'))
+
+print("=" * 60)
+print("ARCHIVOS NORMALIZADOS ENCONTRADOS")
+print("=" * 60)
+for a in archivos_csv:
+    print(f"  {a.name}")
+print(f"\nTotal: {len(archivos_csv)} archivos")
+
+
+# ══════════════════════════════════════════════
+# BLOQUE 1 — Primeras filas de todos los archivos
+# ══════════════════════════════════════════════
+
+print("\n" + "=" * 60)
+print("BLOQUE 1: PRIMERAS FILAS DE TODOS LOS ARCHIVOS")
+print("=" * 60)
+
+for csv in archivos_csv:
+    df = pd.read_csv(csv)
+
+    print(f"\n{'─' * 60}")
+    print(f"  {csv.name}")
+    print(f"  Shape: {df.shape}  |  Columnas: {len(df.columns)}")
+    print(f"{'─' * 60}")
+    print(df.head(5).to_string(index=False))
+
+    del df
+
+
+# ══════════════════════════════════════════════
+# BLOQUE 2 — Inspección detallada de un archivo
+# ══════════════════════════════════════════════
+
+print("\n" + "=" * 60)
+print("BLOQUE 2: INSPECCIÓN DETALLADA")
+print("=" * 60)
+
+
+archivo_verificar = carpeta / "N-CMAPSS_DS01-005_dev_norm.csv"
+
+df = pd.read_csv(archivo_verificar)
+
+print(f"\nArchivo:  {archivo_verificar.name}")
+print(f"Shape:    {df.shape}")
+print(f"Columnas: {df.columns.tolist()}")
+
+# Definimos las columnas a excluir, puesto que carecen de sentido físico relevante (únicamente indicadores temporales).
+cols_W       = ['alt', 'Mach', 'TRA', 'T2']
+cols_excluir  = cols_W + ['RUL', 'unit', 'cycle', 'Fc', 'hs']
+cols_sensores = df.select_dtypes('float64').columns.tolist()
+cols_sensores = [c for c in cols_sensores if c not in cols_excluir]
+
+# Bloque A — Descriptores de vuelo (sin normalizar)
+print("\nEstadísticos — descriptores de vuelo (W):")
+print(df[cols_W].describe().round(4).loc[['mean', 'std', 'min', 'max']].to_string())
+
+# Bloque B — Sensores físicos normalizados (X_s)
+print("\nEstadísticos — sensores físicos normalizados (X_s):")
+print(df[cols_sensores].describe().round(4).loc[['mean', 'std', 'min', 'max']].to_string())
+del df
+
+
+# ══════════════════════════════════════════════
+# BLOQUE 3 — Resumen global de todos los archivos
+# ══════════════════════════════════════════════
+
+print("\n" + "=" * 60)
+print("BLOQUE 3: RESUMEN GLOBAL")
+print("=" * 60)
+
+for csv in archivos_csv:
+    df = pd.read_csv(csv)
+
+    rul_min  = df['RUL'].min()
+    rul_max  = df['RUL'].max()
+    rul_mean = df['RUL'].mean()
+    cols_W       = ['alt', 'Mach', 'TRA', 'T2']
+    cols_meta    = ['unit', 'cycle', 'Fc', 'hs']
+    cols_excluir = cols_W + cols_meta + ['RUL']
+    cols_sensores = [c for c in cols_sensores if c not in cols_excluir]
+    mean_ok = df[cols_sensores].mean().abs().max()
+    std_ok  = df[cols_sensores].std().max()
+
+    rul_std = df['RUL'].std()  #Normalizamos la media de RUL por separado.
+
+    estado_norm = "✓ OK" if mean_ok < 0.65 and std_ok < 1.5 else "REVISAR"
+
+    print(f"  {csv.name:<45}  "
+          f"shape: {str(df.shape):<20}  "
+          f"RUL: [{rul_min:.0f}–{rul_max:.0f}]  "
+          f"RUL_media: {rul_mean:.1f}  "
+          f"RUL_std: {rul_std:.2f}  "
+          f"sensor_mean: {mean_ok:.4f}  "
+          f"sensor_std: {std_ok:.4f}  "
+          f"norm: {estado_norm}")
+
+    del df

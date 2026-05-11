@@ -1,0 +1,177 @@
+import numpy as np
+import pandas as pd
+from pathlib import Path
+
+# ─────────────────────────────────────────────
+# PARÁMETROS
+# ─────────────────────────────────────────────
+VENTANA          = 30
+PASO             = 25
+
+carpeta          = Path(r"C:\Users\nacho\OneDrive\Escritorio\C-MAPSS 2\normalizados")
+carpeta_ventanas = carpeta.parent / "ventanas"
+carpeta_ventanas.mkdir(exist_ok=True)
+
+cols_W       = ['alt', 'Mach', 'TRA', 'T2']
+cols_meta    = ['unit', 'cycle', 'Fc', 'hs']
+cols_excluir = cols_W + cols_meta + ['RUL']
+
+
+# ══════════════════════════════════════════════
+# FUNCIÓN: construir ventanas para un único motor
+# ══════════════════════════════════════════════
+
+def construir_ventanas(df, ventana=30, paso=1):
+    """
+    Recibe el DataFrame de un único motor ya normalizado
+    y devuelve las ventanas X y los targets Y.
+
+    X shape: (n_ventanas, ventana, n_sensores)
+    Y shape: (n_ventanas,)
+    """
+    cols_sensores = [c for c in df.columns if c not in cols_excluir]
+    datos = df[cols_sensores].values
+    rul   = df['RUL'].values
+
+    X, Y = [], []
+
+    for i in range(0, len(datos) - ventana + 1, paso):
+        X.append(datos[i : i + ventana])
+        Y.append(rul[i + ventana - 1])
+
+    return np.array(X, dtype=np.float32), np.array(Y, dtype=np.float32)
+
+
+# ══════════════════════════════════════════════
+# FUNCIÓN: construir dataset completo por archivo
+# ══════════════════════════════════════════════
+
+def construir_dataset(archivo_csv, ventana=30, paso=1):
+    """
+    Carga un CSV normalizado, separa por motor y
+    construye ventanas respetando los límites de cada motor.
+    """
+    df = pd.read_csv(archivo_csv)
+
+    X_total, Y_total = [], []
+
+    for motor in df['unit'].unique():
+        df_motor = df[df['unit'] == motor].reset_index(drop=True)
+
+        if len(df_motor) < ventana:
+            print(f"  ⚠️  Motor {motor} omitido — pocas muestras")
+            continue
+
+        X_motor, Y_motor = construir_ventanas(df_motor, ventana, paso)
+        X_total.append(X_motor)
+        Y_total.append(Y_motor)
+        del X_motor, Y_motor
+
+    X = np.concatenate(X_total, axis=0)
+    Y = np.concatenate(Y_total, axis=0)
+    del X_total, Y_total
+
+    return X, Y
+
+
+# ══════════════════════════════════════════════
+# BLOQUE 1 — Prueba con un único archivo
+#            Verificar shape y memoria antes
+#            de lanzar el proceso completo
+# ══════════════════════════════════════════════
+
+print("=" * 60)
+print("BLOQUE 1: PRUEBA CON UN ÚNICO ARCHIVO")
+print("=" * 60)
+
+archivo_prueba = carpeta / "N-CMAPSS_DS01-005_dev_norm.csv"
+
+try:
+    X_prueba, Y_prueba = construir_dataset(archivo_prueba,
+                                           ventana=VENTANA,
+                                           paso=PASO)
+
+    print(f"\n  Archivo:  {archivo_prueba.name}")
+    print(f"  X shape:  {X_prueba.shape}  → (n_ventanas, {VENTANA}, n_sensores)")
+    print(f"  Y shape:  {Y_prueba.shape}")
+    print(f"  Memoria:  {X_prueba.nbytes / 1e6:.1f} MB")
+    print(f"\n  Primeros 5 RUL: {Y_prueba[:5]}")
+    print(f"  Últimos  5 RUL: {Y_prueba[-5:]}")
+
+    del X_prueba, Y_prueba
+    print("\n  ✓ Prueba completada correctamente.")
+
+except Exception as e:
+    print(f"  ⚠️  Error en prueba: {e}")
+
+
+# ══════════════════════════════════════════════
+# BLOQUE 2 — Procesar y guardar todos los archivos
+#            en disco archivo a archivo
+# ══════════════════════════════════════════════
+
+print("\n" + "=" * 60)
+print("BLOQUE 2: CONSTRUCCIÓN DE VENTANAS — TODOS LOS ARCHIVOS")
+print("=" * 60)
+
+archivos_dev  = sorted(carpeta.glob('*_dev_norm.csv'))
+archivos_test = sorted(carpeta.glob('*_test_norm.csv'))
+
+print(f"\n  Dev:  {len(archivos_dev)} archivos")
+print(f"  Test: {len(archivos_test)} archivos")
+print(f"  Ventana: {VENTANA} ciclos  |  Paso: {PASO}")
+print(f"  Guardando en: {carpeta_ventanas}\n")
+
+for archivo in archivos_dev + archivos_test:
+    print(f"Procesando {archivo.name}...")
+
+    try:
+        X, Y = construir_dataset(archivo, ventana=VENTANA, paso=PASO)
+
+        # Guardar en disco inmediatamente y liberar memoria
+        nombre_salida = carpeta_ventanas / \
+                        f"{archivo.stem.replace('_norm', '_vent')}.npz"
+        np.savez_compressed(nombre_salida, X=X, Y=Y)
+
+        print(f"  X shape:  {X.shape}")
+        print(f"  Y shape:  {Y.shape}")
+        print(f"  Memoria:  {X.nbytes / 1e6:.1f} MB")
+        print(f"  Guardado: {nombre_salida.name}\n")
+
+        del X, Y
+
+    except Exception as e:
+        print(f"OMITIDO — {e}\n")
+        continue
+
+
+# ══════════════════════════════════════════════
+# BLOQUE 3 — Verificación de archivos generados
+# ══════════════════════════════════════════════
+
+print("=" * 60)
+print("BLOQUE 3: VERIFICACIÓN DE ARCHIVOS .npz GENERADOS")
+print("=" * 60)
+
+archivos_npz = sorted(carpeta_ventanas.glob('*.npz'))
+print(f"\n  Total archivos generados: {len(archivos_npz)}\n")
+
+for npz in archivos_npz:
+    try:
+        datos = np.load(npz)
+        X = datos['X']
+        Y = datos['Y']
+
+        print(f"  {npz.name}")
+        print(f"  X shape: {X.shape}  |  "
+              f"Y shape: {Y.shape}  |  "
+              f"RUL: [{Y.min():.0f}–{Y.max():.0f}]  |  "
+              f"Tamaño: {X.nbytes / 1e6:.1f} MB")
+
+        del X, Y, datos
+
+    except Exception as e:
+        print(f"Error leyendo {npz.name}: {e}")
+
+print("\n✓ Proceso completo.")
+print(f"  Archivos .npz disponibles en: {carpeta_ventanas}")

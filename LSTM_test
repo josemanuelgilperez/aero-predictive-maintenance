@@ -1,0 +1,284 @@
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from tensorflow import keras
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+from pathlib import Path
+
+from config import (CARPETA_NORM, CARPETA_VENTANAS,
+                    COLS_EXCLUIR, VENTANA,
+                    RUTA_MODELO_LSTM)
+
+# ─────────────────────────────────────────────
+# CARGAR MODELO ENTRENADO
+# ─────────────────────────────────────────────
+print("=" * 60)
+print("LSTM — EVALUACIÓN")
+print("=" * 60)
+
+modelo = keras.models.load_model(
+    str(RUTA_MODELO_LSTM),
+    compile = False    # ← ignora la configuración de compilación
+)
+
+# Recompilar manualmente
+modelo.compile(
+    optimizer = 'adam',
+    loss      = 'mse',
+    metrics   = ['mae']
+)
+
+print(f"\n  ✓ Modelo cargado correctamente")
+print(f"  Parámetros totales: {modelo.count_params():,}")
+modelo.summary()
+
+
+# ══════════════════════════════════════════════
+# BLOQUE 1 — Recuperación de sensores y datos
+# ══════════════════════════════════════════════
+
+print("\n" + "=" * 60)
+print("BLOQUE 1: CARGA DE DATOS TEST")
+print("=" * 60)
+
+# ── Recuperar nombres de sensores ──
+df_ref        = pd.read_csv(next(CARPETA_NORM.glob('*_dev_norm.csv')))
+cols_sensores = [c for c in df_ref.columns if c not in COLS_EXCLUIR]
+del df_ref
+
+n_sensores = len(cols_sensores)
+print(f"\n  Sensores: {n_sensores}")
+print(f"  Ventana:  {VENTANA} ciclos")
+print(f"  Shape entrada: (batch, {VENTANA}, {n_sensores})")
+
+# ── Localizar archivos test ──
+archivos_test = sorted(CARPETA_VENTANAS.glob('*_test_vent.npz'))
+print(f"\n  Archivos test encontrados: {len(archivos_test)}")
+for a in archivos_test:
+    print(f"    {a.name}")
+
+
+    # ══════════════════════════════════════════════
+# BLOQUE 2 — Evaluación con métricas
+# ══════════════════════════════════════════════
+
+print("\n" + "=" * 60)
+print("BLOQUE 2: MÉTRICAS POR ARCHIVO")
+print("=" * 60)
+
+# ── Función NASA Score ──
+def nasa_score(y_real, y_pred):
+    delta = y_pred - y_real
+    score = np.sum(np.where(delta < 0,
+                            np.exp(-delta / 13) - 1,
+                            np.exp( delta / 10) - 1))
+    return score
+
+# ── Evaluación archivo a archivo ──
+resultados = []
+
+for archivo in archivos_test:
+    print(f"\n  Evaluando {archivo.name}...")
+
+    try:
+        datos  = np.load(archivo)
+        X_test = datos['X'].astype(np.float32)
+        Y_test = datos['Y'].astype(np.float32)
+        del datos
+
+        # Predicción — la LSTM recibe (N, 30, 14) directamente
+        Y_pred = modelo.predict(X_test, verbose=0).flatten()
+
+        rmse  = np.sqrt(mean_squared_error(Y_test, Y_pred))
+        mae   = mean_absolute_error(Y_test, Y_pred)
+        score = nasa_score(Y_test, Y_pred)
+
+        resultados.append({
+            'archivo'   : archivo.stem,
+            'n_muestras': len(Y_test),
+            'RMSE'      : round(rmse,  4),
+            'MAE'       : round(mae,   4),
+            'NASA_Score': round(score, 2)
+        })
+
+        print(f"  RMSE:       {rmse:.4f}")
+        print(f"  MAE:        {mae:.4f}")
+        print(f"  NASA Score: {score:.2f}")
+
+        del X_test, Y_test, Y_pred
+
+    except Exception as e:
+        print(f"  ⚠️  OMITIDO — {e}")
+        continue
+
+# ── Resumen global ──
+df_resultados = pd.DataFrame(resultados)
+
+print("\n" + "=" * 60)
+print("RESUMEN GLOBAL DE MÉTRICAS")
+print("=" * 60)
+print(df_resultados.to_string(index=False))
+print(f"\n  RMSE medio:       {df_resultados['RMSE'].mean():.4f}")
+print(f"  MAE medio:        {df_resultados['MAE'].mean():.4f}")
+print(f"  NASA Score total: {df_resultados['NASA_Score'].sum():.2f}")
+
+# ── Comparativa con Random Forest ──
+print("\n" + "=" * 60)
+print("COMPARATIVA LSTM vs RANDOM FOREST")
+print("=" * 60)
+print(f"\n  {'Métrica':<15} {'Random Forest':>15} {'LSTM':>15} {'Mejora':>10}")
+print(f"  {'─'*55}")
+
+rf_rmse  = 14.6329
+rf_mae   = 11.9187
+rf_score = 4543431.12
+
+lstm_rmse  = df_resultados['RMSE'].mean()
+lstm_mae   = df_resultados['MAE'].mean()
+lstm_score = df_resultados['NASA_Score'].sum()
+
+mejora_rmse  = (rf_rmse  - lstm_rmse)  / rf_rmse  * 100
+mejora_mae   = (rf_mae   - lstm_mae)   / rf_mae   * 100
+mejora_score = (rf_score - lstm_score) / rf_score * 100
+
+print(f"  {'RMSE':<15} {rf_rmse:>15.4f} {lstm_rmse:>15.4f} "
+      f"{mejora_rmse:>+9.1f}%")
+print(f"  {'MAE':<15} {rf_mae:>15.4f} {lstm_mae:>15.4f} "
+      f"{mejora_mae:>+9.1f}%")
+print(f"  {'NASA Score':<15} {rf_score:>15.2f} {lstm_score:>15.2f} "
+      f"{mejora_score:>+9.1f}%")
+
+
+# ══════════════════════════════════════════════
+# BLOQUE 3 — Corrección de sesgo y gráficas
+# ══════════════════════════════════════════════
+
+print("\n" + "=" * 60)
+print("BLOQUE 3: CORRECCIÓN DE SESGO Y GRÁFICAS")
+print("=" * 60)
+
+# ── Calcular sesgo sobre todos los archivos test ──
+print("\n  Calculando sesgo de sobreestimación...")
+
+Y_test_total = []
+Y_pred_total = []
+
+for archivo in archivos_test:
+    try:
+        datos  = np.load(archivo)
+        X_test = datos['X'].astype(np.float32)
+        Y_test = datos['Y'].astype(np.float32)
+        del datos
+
+        Y_pred = modelo.predict(X_test, verbose=0).flatten()
+        Y_test_total.append(Y_test)
+        Y_pred_total.append(Y_pred)
+        del X_test, Y_test, Y_pred
+
+    except Exception as e:
+        print(f"  ⚠️  {archivo.name} omitido — {e}")
+        continue
+
+Y_test_all     = np.concatenate(Y_test_total)
+Y_pred_all     = np.concatenate(Y_pred_total)
+
+# ── Calcular y aplicar corrección de sesgo ──
+sesgo          = np.mean(Y_pred_all - Y_test_all)
+Y_pred_corr    = Y_pred_all - sesgo
+
+print(f"  Sesgo detectado:     {sesgo:+.4f} ciclos")
+print(f"  Interpretación:      el modelo {'sobreestima' if sesgo > 0 else 'subestima'} "
+      f"en media {abs(sesgo):.2f} ciclos")
+
+# ── Recalcular métricas con corrección ──
+rmse_orig  = np.sqrt(mean_squared_error(Y_test_all, Y_pred_all))
+rmse_corr  = np.sqrt(mean_squared_error(Y_test_all, Y_pred_corr))
+mae_orig   = mean_absolute_error(Y_test_all, Y_pred_all)
+mae_corr   = mean_absolute_error(Y_test_all, Y_pred_corr)
+score_orig = nasa_score(Y_test_all, Y_pred_all)
+score_corr = nasa_score(Y_test_all, Y_pred_corr)
+
+print(f"\n  {'Métrica':<15} {'Original':>12} {'Corregido':>12} {'Cambio':>10}")
+print(f"  {'─' * 52}")
+print(f"  {'RMSE':<15} {rmse_orig:>12.4f} {rmse_corr:>12.4f} "
+      f"{rmse_corr - rmse_orig:>+9.4f}")
+print(f"  {'MAE':<15} {mae_orig:>12.4f} {mae_corr:>12.4f} "
+      f"{mae_corr - mae_orig:>+9.4f}")
+print(f"  {'NASA Score':<15} {score_orig:>12.2f} {score_corr:>12.2f} "
+      f"{(score_corr - score_orig) / score_orig * 100:>+9.1f}%")
+
+
+# ── Gráficas ──
+errores_orig = Y_test_all - Y_pred_all
+errores_corr = Y_test_all - Y_pred_corr
+
+fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+fig.suptitle('Evaluación LSTM v2 — Dataset N-CMAPSS\n'
+             'Fila superior: sin corrección  |  '
+             'Fila inferior: con corrección de sesgo',
+             fontsize=13, fontweight='bold')
+
+lim = max(Y_test_all.max(), Y_pred_all.max())
+
+for fila, (Y_pred, errores, titulo) in enumerate([
+    (Y_pred_all,  errores_orig, 'Sin corrección'),
+    (Y_pred_corr, errores_corr, 'Con corrección de sesgo')
+]):
+    # ── Scatter RUL predicho vs real ──
+    axes[fila, 0].scatter(Y_test_all, Y_pred,
+                          alpha=0.05, s=1, color='steelblue')
+    axes[fila, 0].plot([0, lim], [0, lim],
+                       color='crimson', linewidth=1.5,
+                       linestyle='--', label='Predicción perfecta')
+    axes[fila, 0].set_xlabel('RUL real (ciclos)')
+    axes[fila, 0].set_ylabel('RUL predicho (ciclos)')
+    axes[fila, 0].set_title(f'RUL predicho vs real — {titulo}')
+    axes[fila, 0].legend()
+    axes[fila, 0].grid(True, alpha=0.3)
+
+    # ── Distribución del error ──
+    axes[fila, 1].hist(errores, bins=80,
+                       color='steelblue', edgecolor='none', alpha=0.8)
+    axes[fila, 1].axvline(x=0, color='crimson',
+                          linewidth=1.5, linestyle='--',
+                          label='Error = 0')
+    axes[fila, 1].axvline(x=errores.mean(), color='orange',
+                          linewidth=1.5, linestyle='--',
+                          label=f'Media = {errores.mean():.2f}')
+    axes[fila, 1].set_xlabel('Error (RUL real - RUL predicho)')
+    axes[fila, 1].set_ylabel('Frecuencia')
+    axes[fila, 1].set_title(f'Distribución del error — {titulo}')
+    axes[fila, 1].legend()
+    axes[fila, 1].grid(True, alpha=0.3)
+
+    # ── Evolución temporal primer archivo test ──
+    datos_ej  = np.load(archivos_test[0])
+    X_ej      = datos_ej['X'].astype(np.float32)
+    Y_ej_real = datos_ej['Y'].astype(np.float32)
+    Y_ej_pred = modelo.predict(X_ej, verbose=0).flatten()
+
+    if fila == 1:
+        Y_ej_pred = Y_ej_pred - sesgo  # aplicar corrección
+
+    axes[fila, 2].plot(Y_ej_real, color='steelblue',
+                       linewidth=0.8, label='RUL real', alpha=0.8)
+    axes[fila, 2].plot(Y_ej_pred, color='crimson',
+                       linewidth=0.8, label='RUL predicho', alpha=0.8)
+    axes[fila, 2].set_xlabel('Muestra temporal')
+    axes[fila, 2].set_ylabel('RUL (ciclos)')
+    axes[fila, 2].set_title(f'Evolución temporal — {titulo}\n'
+                             f'{archivos_test[0].stem}')
+    axes[fila, 2].legend()
+    axes[fila, 2].grid(True, alpha=0.3)
+
+    del datos_ej, X_ej, Y_ej_real, Y_ej_pred
+
+plt.tight_layout()
+plt.savefig('evaluacion_lstm_v2.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+print("\n✓ Evaluación completada.")
+print("  Gráfica guardada: evaluacion_lstm_v2.png")

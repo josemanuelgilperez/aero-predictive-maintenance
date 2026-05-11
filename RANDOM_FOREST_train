@@ -1,0 +1,86 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+from pathlib import Path
+
+# Importar configuración global
+from config import (CARPETA_NORM, CARPETA_VENTANAS,
+                    COLS_EXCLUIR, VENTANA, PASO,
+                    RF_N_ESTIMATORS, RF_MAX_DEPTH, RF_RANDOM_STATE)
+
+
+# ══════════════════════════════════════════════
+# BLOQUE 2 — Carga y entrenamiento incremental
+# ══════════════════════════════════════════════
+
+# ── Recuperar nombres reales de sensores ──
+df_ref        = pd.read_csv(next(CARPETA_NORM.glob('*_dev_norm.csv')))
+cols_sensores = [c for c in df_ref.columns if c not in COLS_EXCLUIR]
+del df_ref
+
+print("=" * 60)
+print("BLOQUE 2: CARGA DE DATOS Y ENTRENAMIENTO INCREMENTAL")
+print("=" * 60)
+print(f"\nSensores utilizados ({len(cols_sensores)}): {cols_sensores}")
+print(f"Características por ventana: {VENTANA * len(cols_sensores)}")
+
+archivos_dev  = sorted(CARPETA_VENTANAS.glob('*_dev_vent.npz'))
+archivos_test = sorted(CARPETA_VENTANAS.glob('*_test_vent.npz'))
+
+print(f"\nArchivos dev:  {len(archivos_dev)}")
+print(f"Archivos test: {len(archivos_test)}")
+
+
+# ══════════════════════════════════════════════
+# BLOQUE 3 — Entrenamiento incremental
+# ══════════════════════════════════════════════
+
+print("\n" + "=" * 60)
+print("BLOQUE 3: ENTRENAMIENTO RANDOM FOREST")
+print("=" * 60)
+
+# warm_start=True permite añadir árboles al bosque existente
+# en lugar de reentrenar desde cero en cada archivo
+rf = RandomForestRegressor(
+    n_estimators  = RF_N_ESTIMATORS,
+    max_depth     = RF_MAX_DEPTH,
+    n_jobs        = -1,
+    random_state  = RF_RANDOM_STATE,
+    warm_start    = True
+)
+
+arboles_acumulados = 0
+
+for i, archivo in enumerate(archivos_dev):
+    print(f"\n  Procesando {archivo.name}...")
+
+    try:
+        datos = np.load(archivo)
+        X     = datos['X'].reshape(datos['X'].shape[0], -1)
+        Y     = datos['Y']
+        print(f"  X shape: {X.shape}  |  Memoria: {X.nbytes / 1e6:.1f} MB")
+
+        # Añadir árboles nuevos en cada iteración
+        arboles_acumulados      += RF_N_ESTIMATORS
+        rf.n_estimators          = arboles_acumulados
+        rf.fit(X, Y)
+
+        print(f"  ✓ Entrenado — árboles acumulados: {arboles_acumulados}")
+        del X, Y, datos
+
+    except Exception as e:
+        print(f"  ⚠️  OMITIDO — {e}")
+        continue
+
+print(f"\n✓ Entrenamiento completado.")
+print(f"  Total árboles en el bosque: {rf.n_estimators}")
+
+import joblib
+
+# ── Guardar modelo entrenado en disco ──
+ruta_modelo = Path(r"C:\Users\nacho\OneDrive\Escritorio\UCLM AEROESPACIAL\TFG\CÓDIGOS\modelo_rf.pkl")
+joblib.dump(rf, ruta_modelo)
+
+print(f"\n✓ Modelo guardado en: {ruta_modelo}")

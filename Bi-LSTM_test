@@ -1,0 +1,273 @@
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from tensorflow import keras
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+from pathlib import Path
+
+from config import (CARPETA_NORM, CARPETA_VENTANAS,
+                    COLS_EXCLUIR, VENTANA,
+                    RUTA_MODELO_BILSTM)
+
+
+# ─────────────────────────────────────────────
+# DEFINICIÓN DE LA NASA LOSS HÍBRIDA
+# ─────────────────────────────────────────────
+# Necesaria para cargar el modelo correctamente
+def nasa_loss_hibrida(y_real, y_pred, alpha=0.5):
+    delta    = y_pred - y_real
+    mse_loss = tf.reduce_mean(tf.square(delta))
+    nasa     = tf.where(
+        delta < 0,
+        tf.exp(-delta / 13.0) - 1.0,
+        tf.exp( delta / 10.0) - 1.0
+    )
+    nasa_loss = tf.reduce_mean(nasa)
+    return (1 - alpha) * mse_loss + alpha * nasa_loss
+
+
+# ─────────────────────────────────────────────
+# CARGAR MODELO ENTRENADO
+# ─────────────────────────────────────────────
+print("=" * 60)
+print("Bi-LSTM — EVALUACIÓN")
+print("=" * 60)
+
+modelo = keras.models.load_model(
+    str(RUTA_MODELO_BILSTM),
+    compile = False
+)
+
+# Recompilar con la loss personalizada
+modelo.compile(
+    optimizer = 'adam',
+    loss      = nasa_loss_hibrida,
+    metrics   = ['mae']
+)
+
+print(f"\n  ✓ Modelo cargado correctamente")
+print(f"  Parámetros totales: {modelo.count_params():,}")
+modelo.summary()
+
+
+
+# ══════════════════════════════════════════════
+# BLOQUE 1 — Recuperación de sensores y datos
+# ══════════════════════════════════════════════
+
+print("\n" + "=" * 60)
+print("BLOQUE 1: CARGA DE DATOS TEST")
+print("=" * 60)
+
+# ── Recuperar nombres de sensores ──
+df_ref        = pd.read_csv(next(CARPETA_NORM.glob('*_dev_norm.csv')))
+cols_sensores = [c for c in df_ref.columns if c not in COLS_EXCLUIR]
+del df_ref
+
+n_sensores = len(cols_sensores)
+print(f"\n  Sensores: {n_sensores}")
+print(f"  Ventana:  {VENTANA} ciclos")
+print(f"  Shape entrada: (batch, {VENTANA}, {n_sensores})")
+
+# ── Localizar archivos test ──
+archivos_test = sorted(CARPETA_VENTANAS.glob('*_test_vent.npz'))
+print(f"\n  Archivos test encontrados: {len(archivos_test)}")
+for a in archivos_test:
+    print(f"    {a.name}")
+
+
+
+
+# ══════════════════════════════════════════════
+# BLOQUE 2 — Evaluación con métricas
+# ══════════════════════════════════════════════
+
+print("\n" + "=" * 60)
+print("BLOQUE 2: MÉTRICAS POR ARCHIVO")
+print("=" * 60)
+
+
+# ── Función NASA Score ──
+def nasa_score(y_real, y_pred):
+    delta = y_pred - y_real
+    score = np.sum(np.where(delta < 0,
+                            np.exp(-delta / 13) - 1,
+                            np.exp( delta / 10) - 1))
+    return score
+
+
+# ── Evaluación archivo a archivo ──
+resultados = []
+
+for archivo in archivos_test:
+    print(f"\n  Evaluando {archivo.name}...")
+
+    try:
+        datos  = np.load(archivo)
+        X_test = datos['X'].astype(np.float32)
+        Y_test = datos['Y'].astype(np.float32)
+        del datos
+
+        Y_pred = modelo.predict(X_test, verbose=0).flatten()
+
+        rmse  = np.sqrt(mean_squared_error(Y_test, Y_pred))
+        mae   = mean_absolute_error(Y_test, Y_pred)
+        score = nasa_score(Y_test, Y_pred)
+
+        resultados.append({
+            'archivo'   : archivo.stem,
+            'n_muestras': len(Y_test),
+            'RMSE'      : round(rmse,  4),
+            'MAE'       : round(mae,   4),
+            'NASA_Score': round(score, 2)
+        })
+
+        print(f"  RMSE:       {rmse:.4f}")
+        print(f"  MAE:        {mae:.4f}")
+        print(f"  NASA Score: {score:.2f}")
+
+        del X_test, Y_test, Y_pred
+
+    except Exception as e:
+        print(f"  ⚠️  OMITIDO — {e}")
+        continue
+
+
+# ── Resumen global ──
+df_resultados = pd.DataFrame(resultados)
+
+print("\n" + "=" * 60)
+print("RESUMEN GLOBAL DE MÉTRICAS")
+print("=" * 60)
+print(df_resultados.to_string(index=False))
+print(f"\n  RMSE medio:       {df_resultados['RMSE'].mean():.4f}")
+print(f"  MAE medio:        {df_resultados['MAE'].mean():.4f}")
+print(f"  NASA Score total: {df_resultados['NASA_Score'].sum():.2f}")
+
+
+# ── Comparativa con LSTM v2 y Random Forest ──
+print("\n" + "=" * 60)
+print("COMPARATIVA Bi-LSTM vs LSTM v2 vs RANDOM FOREST")
+print("=" * 60)
+
+rf_rmse,    rf_mae,    rf_score    = 14.6329, 11.9187,  4543431.12
+lstm_rmse,  lstm_mae,  lstm_score  = 13.5968, 10.8039, 11185138.00
+
+bilstm_rmse  = df_resultados['RMSE'].mean()
+bilstm_mae   = df_resultados['MAE'].mean()
+bilstm_score = df_resultados['NASA_Score'].sum()
+
+print(f"\n  {'Métrica':<15} {'RF':>13} {'LSTM v2':>13} {'Bi-LSTM':>13}")
+print(f"  {'─' * 60}")
+print(f"  {'RMSE':<15} {rf_rmse:>13.4f} {lstm_rmse:>13.4f} {bilstm_rmse:>13.4f}")
+print(f"  {'MAE':<15} {rf_mae:>13.4f} {lstm_mae:>13.4f} {bilstm_mae:>13.4f}")
+print(f"  {'NASA Score':<15} {rf_score:>13.2f} {lstm_score:>13.2f} {bilstm_score:>13.2f}")
+
+
+
+# ══════════════════════════════════════════════
+# BLOQUE 3 — Gráficas de evaluación
+# ══════════════════════════════════════════════
+
+print("\n" + "=" * 60)
+print("BLOQUE 3: GRÁFICAS DE EVALUACIÓN")
+print("=" * 60)
+
+
+# ── Acumular predicciones de todos los archivos test ──
+print("\n  Generando predicciones globales...")
+
+Y_test_total = []
+Y_pred_total = []
+
+for archivo in archivos_test:
+    try:
+        datos  = np.load(archivo)
+        X_test = datos['X'].astype(np.float32)
+        Y_test = datos['Y'].astype(np.float32)
+        del datos
+
+        Y_pred = modelo.predict(X_test, verbose=0).flatten()
+        Y_test_total.append(Y_test)
+        Y_pred_total.append(Y_pred)
+        del X_test, Y_test, Y_pred
+
+    except Exception as e:
+        print(f"  ⚠️  {archivo.name} omitido — {e}")
+        continue
+
+Y_test_all = np.concatenate(Y_test_total)
+Y_pred_all = np.concatenate(Y_pred_total)
+errores    = Y_test_all - Y_pred_all
+
+print(f"  Total muestras evaluadas: {len(Y_test_all):,}")
+print(f"  Sesgo medio: {errores.mean():+.4f} ciclos")
+
+
+# ── Gráficas ──
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+fig.suptitle('Evaluación Bi-LSTM — Dataset N-CMAPSS\n'
+             'Loss: NASA híbrida (MSE + asimétrica)',
+             fontsize=13, fontweight='bold')
+
+
+# ── Gráfica 1 — Scatter RUL predicho vs real ──
+lim = max(Y_test_all.max(), Y_pred_all.max())
+
+axes[0].scatter(Y_test_all, Y_pred_all,
+                alpha=0.05, s=1, color='steelblue')
+axes[0].plot([0, lim], [0, lim],
+             color='crimson', linewidth=1.5,
+             linestyle='--', label='Predicción perfecta')
+axes[0].set_xlabel('RUL real (ciclos)')
+axes[0].set_ylabel('RUL predicho (ciclos)')
+axes[0].set_title('RUL predicho vs real')
+axes[0].legend()
+axes[0].grid(True, alpha=0.3)
+
+
+# ── Gráfica 2 — Distribución del error ──
+axes[1].hist(errores, bins=80,
+             color='steelblue', edgecolor='none', alpha=0.8)
+axes[1].axvline(x=0, color='crimson',
+                linewidth=1.5, linestyle='--',
+                label='Error = 0')
+axes[1].axvline(x=errores.mean(), color='orange',
+                linewidth=1.5, linestyle='--',
+                label=f'Media = {errores.mean():.2f}')
+axes[1].set_xlabel('Error (RUL real - RUL predicho)')
+axes[1].set_ylabel('Frecuencia')
+axes[1].set_title('Distribución del error')
+axes[1].legend()
+axes[1].grid(True, alpha=0.3)
+
+
+# ── Gráfica 3 — Evolución temporal primer archivo test ──
+datos_ej  = np.load(archivos_test[0])
+X_ej      = datos_ej['X'].astype(np.float32)
+Y_ej_real = datos_ej['Y'].astype(np.float32)
+Y_ej_pred = modelo.predict(X_ej, verbose=0).flatten()
+
+axes[2].plot(Y_ej_real, color='steelblue',
+             linewidth=0.8, label='RUL real', alpha=0.8)
+axes[2].plot(Y_ej_pred, color='crimson',
+             linewidth=0.8, label='RUL predicho', alpha=0.8)
+axes[2].set_xlabel('Muestra temporal')
+axes[2].set_ylabel('RUL (ciclos)')
+axes[2].set_title(f'Evolución temporal\n{archivos_test[0].stem}')
+axes[2].legend()
+axes[2].grid(True, alpha=0.3)
+
+del datos_ej, X_ej, Y_ej_real, Y_ej_pred
+
+
+plt.tight_layout()
+plt.savefig('evaluacion_bilstm.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+print("\n✓ Evaluación completada.")
+print("  Gráfica guardada: evaluacion_bilstm.png")
